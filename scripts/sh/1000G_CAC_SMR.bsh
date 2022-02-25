@@ -1,0 +1,94 @@
+!/bin/bash
+#SBATCH -t 04:00:00
+#SBATCH -p standard
+#SBATCH --mem=10000
+#SBATCH -J smr_star
+#SBATCH -A cphg-millerlab
+#SBATCH -o smr_star
+
+#!/bin/bash
+
+## make EA/NEA uppercase 
+#awk -vOFS="\t" '{print $1,$2,$3,toupper($4),toupper($5),$6,$7,$8,$9,$10}' EA_All_FUMA_CAC1000G_Filtered_01072020.txt > EA_All_FUMA_CAC1000G_Filtered_01072020_2.txt
+
+DIR=/scratch/dw2vr/CAC_1000G
+EQTLFILE="AOR.cis.txt"
+GWASFILE="EA_All_FUMA_CAC1000G_Filtered_01072020_2.txt"
+TSSFILE="/scratch/dw2vr/smr/genes_tss.hg19"
+MAF_ANNOTATION="/scratch/dw2vr/ref_files/hg19_20130502_af_0.01_2.txt"
+
+PATH=$PATH:/scratch/dw2vr/smr
+export PATH 
+
+#i=6
+
+
+
+echo "Formatting GWAS data for SMR" 
+#Annotating maf using 1000G EUR ref panel maf > 0.01 
+
+tail -n+2 $DIR/$GWASFILE | awk -v chr="$i" '{if ($2==chr) print}' | awk 'NR==FNR {a[$3]=$0;next} ($9 in a) {print $0, a[$9]}' $MAF_ANNOTATION - > chr${i}_1000G_CAC_MAF_tmp
+
+#annotating EA freq 
+awk 'BEGIN{OFS="\t"; print "SNP","A1","A2","freq","b","se","p","n"}
+{if($4==$15) 
+{
+print $9, $4, $5, $16, $6, $7, $8, $10
+}
+else
+{
+print $9, $4, $5, 1-$16, $6, $7, $8, $10
+}
+}' chr${i}_1000G_CAC_MAF_tmp > chr${i}_1000G_CAC_formatted_for_SMR.txt 
+
+echo "formatting eQTL data to make SMR input besd files " 
+
+#removed ","" from EA/NEA column and AF=0 SNPs and "chr" from chromosome#
+tail -n+2 $DIR/$EQTLFILE | 
+awk 'NR==FNR {a[$3]=$0;next} ($1 in a) {print $0, a[$1]}' $MAF_ANNOTATION  - | 
+awk -v chr="$i" '{if ($6=="chr"chr) print}'| 
+awk -vOFS="\t" '{if($4!=0)print substr($6,4),$1, $7, $9, $10, 1-$11, $3, ($3/$4), $5, $2}'| 
+grep -v "," | awk -vOFS="\t" '{if($6>0 && $6 <1) print}' > chr${i}_anno_${EQTLFILE}
+
+
+
+cut -f10 chr${i}_anno_${EQTLFILE} | sort -u > chr${i}_uniquegenes
+
+
+mkdir STARNET_AOR_besdfiles
+wd=`pwd` #for flist file
+
+mkdir ${wd}/STARNET_AOR_esdfiles
+DIR2=${wd}/STARNET_AOR_esdfiles
+
+echo -e 'Chr''\t'gene'\t'0'\t'tss'\t'gene'\t'direction'\t'path > chr${i}_${EQTLFILE}_flist
+
+
+echo "Formatting data for:"
+while read gene; do
+	echo $gene
+	grep $gene chr${i}_anno_${EQTLFILE} > chr${i}_current_gene_raw_data_rsid_maf.txt
+	awk -vOFS="\t" 'BEGIN{print "Chr","SNP","Bp","A1","A2","Freq","Beta","se","p"}{print$1,$2,$3,$4,$5,$6,$7,$8,$9}' chr${i}_current_gene_raw_data_rsid_maf.txt > ${gene}.esd
+	mv ${gene}.esd $DIR2
+	
+	# add information to flist file
+	genesearch=`echo $gene | awk '{split($0,a,"."); print a[1]}'`
+	chr=`grep $genesearch $TSSFILE | head -n1 | awk '{print $2}'`
+	direction=`grep $genesearch $TSSFILE | head -n1 | awk '{print $3}'`
+	tss=`grep $genesearch $TSSFILE | head -n1 | awk '{print $4}'`
+	path=`echo $DIR2/"$gene.esd"`
+	echo -e $chr'\t'$gene'\t'0'\t'$tss'\t'$gene'\t'$direction'\t'$path >> chr${i}_${EQTLFILE}_flist
+
+done < chr${i}_uniquegenes
+
+## create SMR binary data
+# this creates the binary files in the format SMR uses (.besd)
+# Need to download SMR and provide it the flist file created using the script above
+smr --eqtl-flist chr${i}_${EQTLFILE}_flist --make-besd --out chr${i}_STARNET_AOR
+
+## run SMR
+# 1000G refers to PLINK binary files .bed, .bim, .fam (of any population used as a reference for LD, 1000G is one example)
+smr --bfile /nv/vol185/pubdata/SNP/1000genomes/20130502/1KG.chr${i} \
+--gwas-summary chr${i}_1000G_CAC_formatted_for_SMR.txt  \
+--beqtl-summary chr${i}_STARNET_AOR \
+--out chr${i}_CAC_1000G_smr --thread-num 10 --peqtl-smr 5E-3 --diff-freq-prop 1
